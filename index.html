@@ -429,6 +429,7 @@ window.App = function App() {
       if(!navigator.geolocation) return;
       var gpsBuf=[];
       var outsideConsec=0;
+      var outsideTimer=null;
       var warmup=0;
       var gpsCallback=function(p){
           if(p.coords.accuracy>30) return;
@@ -468,14 +469,18 @@ window.App = function App() {
           var db=d?0:Math.round(distBorde(pLat,pLon,hull));
           setDist(db);
           if(d){
-            outsideConsec=0;
+            // Adentro: cancelar cualquier timer pendiente y confirmar inmediatamente
+            if(outsideTimer) clearTimeout(outsideTimer);
+            outsideTimer=null;
             setDentro(true);
           } else {
-            outsideConsec++;
-            // Moviéndose: 1 lectura alcanza para alarmar (respuesta inmediata)
-            // Quieto: requiere 2 lecturas consecutivas (evita falsos por ruido)
-            var umbral=spd>0.3?1:2;
-            if(outsideConsec>=umbral) setDentro(false);
+            // Afuera: esperar 2 segundos para confirmar que no es ruido
+            if(!outsideTimer){
+              outsideTimer=setTimeout(function(){
+                outsideTimer=null;
+                setDentro(false);
+              },2000);
+            }
           }
         };
       var gpsError=function(e){var m=["","GPS bloqueado","Sin señal","GPS tardó"];setGpsErr(m[e.code]||"Error GPS");};
@@ -486,7 +491,7 @@ window.App = function App() {
       if(wMon.current){navigator.geolocation.clearWatch(wMon.current);wMon.current=null;}
       setDentro(null);setDist(null);setGpsPos(null);
     }
-    return function(){if(wMon.current){navigator.geolocation.clearWatch(wMon.current);wMon.current=null;}};
+    return function(){if(wMon.current){navigator.geolocation.clearWatch(wMon.current);wMon.current=null;}if(outsideTimer){clearTimeout(outsideTimer);outsideTimer=null;}};
   },[paso,puntos.length]);
 
   // Alarma
