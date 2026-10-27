@@ -1,10 +1,10 @@
 {
-  "name": "Zona de Trabajo Seguro \u2014 ET Henderson",
-  "short_name": "Zona Segura HE",
+  "name": "Transener Zona Segura",
+  "short_name": "Zona Segura",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#0f1520",
-  "theme_color": "#d97706",
+  "theme_color": "#16a34a",
   "orientation": "portrait-primary",
   "icons": [
     {
@@ -19,5 +19,7 @@
       "type": "image/png",
       "purpose": "any maskable"
     }
-  ]
+  ],
+  "id": "/transener-zona-segura/",
+  "scope": "/"
 }

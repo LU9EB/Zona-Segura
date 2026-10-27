@@ -3,11 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Zona de Trabajo Seguro — ET Henderson</title>
+  <title>Transener — Zona Segura</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
-  <meta name="theme-color" content="#d97706">
+  <meta name="theme-color" content="#16a34a">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Zona Segura HE">
@@ -147,6 +148,9 @@ var SECCIONES = {
   },
   "KSHE":{
     "KSHE":["DC53","DC54","DC55","DC63","DC64","DC65","DC73","DC74","DC75","DC83","DC84","DC85","DC09","DC51","DC71"]
+  },
+  "ET GENÉRICA":{
+    "__custom__":[]
   }
 };
 
@@ -376,16 +380,30 @@ window.App = function App() {
   var [seccion,  setSeccion]  = useState("LINEAS");
   var [subSec,   setSubSec]   = useState("PUELCHES");
   var [eqSel,    setEqSel]    = useState([]);
+  var [etGenNombre, setEtGenNombre] = useState("");       // nombre de la ET genérica
+  var [etGenInput,  setEtGenInput]  = useState("");       // texto de entrada de equipos
+  var [etGenTipo,   setEtGenTipo]   = useState("INT");    // tipo del equipo a agregar
+  var [etGenEqs,    setEtGenEqs]    = useState([]);       // lista de equipos {id,tipo}
   var [puntos,   setPuntos]   = useState([]);
-  var [gpsVivo,  setGpsVivo]  = useState(null);
-  var [gpsErr,   setGpsErr]   = useState(null);
-  var [dentro,   setDentro]   = useState(null);
-  var [dist,     setDist]     = useState(null);
-  var [gpsPos,   setGpsPos]   = useState(null);
-  var [gpsAcc,   setGpsAcc]   = useState(5);
-  var [reconoc,  setReconoc]  = useState(false);
-  var [popup,    setPopup]    = useState(false);
-  var wReg=useRef(null),wMon=useRef(null),aInt=useRef(null),rTmr=useRef(null);
+  var [gpsVivo,    setGpsVivo]    = useState(null);
+  var [gpsErr,     setGpsErr]     = useState(null);
+  var [dentro,     setDentro]     = useState(null);
+  var [dist,       setDist]       = useState(null);
+  var [gpsPos,     setGpsPos]     = useState(null);
+  var [gpsAcc,     setGpsAcc]     = useState(5);
+  var [reconoc,    setReconoc]    = useState(false);
+  var [popup,      setPopup]      = useState(false);
+  var [confirmar,  setConfirmar]  = useState(null);  // {dist, pos, prevPt} pendiente de confirmar
+  var [distCorr,   setDistCorr]   = useState("");    // v9.2: corrección manual de distancia
+  var [midiendo,   setMidiendo]   = useState(false);   // colectando GPS tras presionar botón
+  var [medCuenta,  setMedCuenta]  = useState(0);        // segundos restantes del conteo
+  var [medFase,    setMedFase]    = useState(0);         // 0=inactivo, 1=primera medición, 2=segunda
+  var midiendoRef = useRef(false);   // mirror sin closure stale
+  var medBuf      = useRef([]);      // lecturas acumuladas durante medición
+  var medRes1     = useRef(null);    // resultado mediana de la primera fase
+  var medRes2     = useRef(null);    // resultado mediana de la segunda fase
+  var gpsVivoRef  = useRef(null);    // lectura cruda actual (para fallback)
+  var wReg=useRef(null),wMon=useRef(null),aInt=useRef(null),rTmr=useRef(null),cuentaInt=useRef(null);
 
   var hull = puntos.length>=4 ? convHull(puntos) : [];
   var estado = dentro==null?"sg":dentro?"ok":dist>gpsAcc?"pe":"sg";
@@ -396,31 +414,39 @@ window.App = function App() {
     sg:{bg:"#12181e",bd:"#475569",tx:"#94a3b8",em:"⚫",lb:"Obteniendo GPS..."}
   }[estado];
 
-  // GPS para registro — con buffer ponderado para puntos más precisos
+  // GPS para registro de puntos (sin modo auto — estabilización espacial)
   useEffect(function(){
     if(paso==="pts"){
       if(!navigator.geolocation){setGpsErr("GPS no disponible");return;}
-      var regBuf=[];
       wReg.current=navigator.geolocation.watchPosition(
         function(p){
-          if(p.coords.accuracy>30) return;
-          var now=Date.now();
-          regBuf.push({lat:p.coords.latitude,lon:p.coords.longitude,acc:p.coords.accuracy,t:now});
-          regBuf=regBuf.filter(function(r){return now-r.t<8000;});
-          if(regBuf.length>5) regBuf=regBuf.slice(regBuf.length-5);
-          var sL=0,sO=0,sW=0;
-          for(var i=0;i<regBuf.length;i++){var w=1/(regBuf[i].acc*regBuf[i].acc);sL+=regBuf[i].lat*w;sO+=regBuf[i].lon*w;sW+=w;}
-          var bAcc=Math.min.apply(null,regBuf.map(function(r){return r.acc;}));
-          setGpsVivo({lat:sL/sW,lon:sO/sW,acc:Math.round(bAcc)});
+          var acc=p.coords.accuracy;
+          if(acc>80) return;
+          var entry={lat:p.coords.latitude,lon:p.coords.longitude,acc:Math.round(acc),t:Date.now()};
+          setGpsVivo(entry);
+          gpsVivoRef.current=entry;
+
+          // Solo acumular lecturas durante una medición activa
+          if(!midiendoRef.current) return;
+          if(acc>25) return; // ignorar señal débil (umbral 25m)
+          medBuf.current=medBuf.current.concat([entry]);
         },
         function(e){var m=["","GPS bloqueado","Sin señal","GPS tardó"];setGpsErr(m[e.code]||"Error GPS");},
         {enableHighAccuracy:true,maximumAge:0,timeout:10000}
       );
     } else {
       if(wReg.current){navigator.geolocation.clearWatch(wReg.current);wReg.current=null;}
-      setGpsVivo(null);setGpsErr(null);
+      clearInterval(cuentaInt.current);
+      midiendoRef.current=false;
+      medRes1.current=null;
+      medRes2.current=null;
+      setGpsVivo(null);setGpsErr(null);setMidiendo(false);setMedCuenta(0);setMedFase(0);
+      medBuf.current=[];gpsVivoRef.current=null;
     }
-    return function(){if(wReg.current){navigator.geolocation.clearWatch(wReg.current);wReg.current=null;}};
+    return function(){
+      if(wReg.current){navigator.geolocation.clearWatch(wReg.current);wReg.current=null;}
+      clearInterval(cuentaInt.current);
+    };
   },[paso]);
 
     // GPS monitoreo
@@ -479,7 +505,7 @@ window.App = function App() {
               outsideTimer=setTimeout(function(){
                 outsideTimer=null;
                 setDentro(false);
-              },2000);
+              },1000);
             }
           }
         };
@@ -507,16 +533,163 @@ window.App = function App() {
     return function(){clearInterval(aInt.current);};
   },[estado,reconoc,paso]);
 
+  function guardarPunto(pos) {
+    setPuntos(function(prev){
+      if(prev.length>=20) return prev;
+      if(prev.length>0){
+        var d=Math.round(distM(pos.lat,pos.lon,prev[prev.length-1].lat,prev[prev.length-1].lon));
+        if(d<2){setGpsErr("Muy cerca del anterior ("+d+"m) — mové más");return prev;}
+        // v8.0: mostrar distancia al anterior para que el JT confirme
+        // v9.2: también guardamos el punto anterior para poder reposicionar si corrige
+        setConfirmar({dist:d,pos:pos,num:prev.length+1,prevPt:prev[prev.length-1]});
+        setDistCorr("");
+        return prev;  // no guardar todavía, esperar confirmación
+      }
+      // Primer punto: guardar directo sin confirmación
+      var tag=pos.acc<=20?"✓":"⚠";
+      setGpsErr(tag+" Punto 1 guardado ±"+pos.acc+"m");
+      setTimeout(function(){setGpsErr(null);},2500);
+      return prev.concat([{lat:pos.lat,lon:pos.lon,acc:pos.acc,num:1}]);
+    });
+  }
+
+  function confirmarPunto(ok) {
+    if(!confirmar) return;
+    if(ok){
+      var p=confirmar.pos;
+      var n=confirmar.num;
+      var dc=parseFloat(distCorr);
+      var finalPos=p;
+      // v9.2: si el JT ingresó una distancia corregida, reposicionar el punto
+      if(!isNaN(dc)&&dc>0&&confirmar.prevPt){
+        var prev2=confirmar.prevPt;
+        // Dirección en radianes: del punto anterior al punto GPS medido
+        var dLat=p.lat-prev2.lat;
+        var dLon=p.lon-prev2.lon;
+        var dist_gps=Math.sqrt(dLat*dLat+dLon*dLon);
+        if(dist_gps>0){
+          // Factor de conversión: 1 grado lat ≈ 111320 m
+          // Estiramos el vector en la misma dirección hasta la distancia corregida
+          var scale=dc/(confirmar.dist||1);
+          var newLat=prev2.lat+dLat*scale;
+          var newLon=prev2.lon+dLon*scale;
+          finalPos={lat:newLat,lon:newLon,acc:p.acc,corr:true};
+        }
+      }
+      setPuntos(function(prev){
+        var tag=finalPos.corr?"📐":p.acc<=20?"✓":"⚠";
+        var msg=finalPos.corr
+          ?"📐 Punto "+n+" corregido a "+Math.round(dc)+"m"
+          :tag+" Punto "+n+" guardado ±"+p.acc+"m";
+        setGpsErr(msg);
+        setTimeout(function(){setGpsErr(null);},2500);
+        return prev.concat([{lat:finalPos.lat,lon:finalPos.lon,acc:finalPos.acc,num:n}]);
+      });
+    } else {
+      setGpsErr("↺ Medición descartada — volvé a registrar el punto");
+      setTimeout(function(){setGpsErr(null);},3000);
+    }
+    setConfirmar(null);
+    setDistCorr("");
+  }
+
+  function calcMediana(buf) {
+    if(buf.length<3) return null; // v9.0: mínimo 3 lecturas válidas, medición 15s
+    var lats=buf.map(function(r){return r.lat;}).sort(function(a,b){return a-b;});
+    var lons=buf.map(function(r){return r.lon;}).sort(function(a,b){return a-b;});
+    var mid=Math.floor(lats.length/2);
+    var medLat=lats.length%2===1?lats[mid]:(lats[mid-1]+lats[mid])/2;
+    var medLon=lons.length%2===1?lons[mid]:(lons[mid-1]+lons[mid])/2;
+    var minAcc=Math.min.apply(null,buf.map(function(r){return r.acc;}));
+    return {lat:medLat,lon:medLon,acc:Math.round(minAcc)};
+  }
+
+  function iniciarFase(fase) {
+    medBuf.current=[];
+    midiendoRef.current=true;
+    setMidiendo(true);
+    setMedFase(fase);
+    setMedCuenta(15);
+    setGpsErr(null);
+    var remaining=15;
+    cuentaInt.current=setInterval(function(){
+      remaining--;
+      setMedCuenta(remaining);
+      if(remaining<=0){
+        clearInterval(cuentaInt.current);
+        var buf=medBuf.current;
+        medBuf.current=[];
+        var result=calcMediana(buf);
+        if(fase===1){
+          if(result){
+            medRes1.current=result;
+            setGpsErr("✓ Medición 1 lista — iniciando segunda...");
+            setTimeout(function(){setGpsErr(null);iniciarFase(2);},1500);
+          } else {
+            midiendoRef.current=false;
+            setMidiendo(false);setMedFase(0);setMedCuenta(0);
+            setGpsErr("✗ Sin señal válida — buscá mejor posición");
+            setTimeout(function(){setGpsErr(null);},3000);
+          }
+        } else if(fase===2){
+          if(result){
+            medRes2.current=result;
+            var r1=medRes1.current;
+            var sep=Math.round(distM(r1.lat,r1.lon,result.lat,result.lon));
+            if(sep<=3){
+              midiendoRef.current=false;
+              setMidiendo(false);setMedFase(0);setMedCuenta(0);
+              var pos={lat:(r1.lat+result.lat)/2,lon:(r1.lon+result.lon)/2,
+                       acc:Math.round((r1.acc+result.acc)/2)};
+              medRes1.current=null;medRes2.current=null;
+              guardarPunto(pos);
+            } else {
+              setGpsErr("⚠ Difieren "+sep+"m — tomando 3ra medición de desempate...");
+              setTimeout(function(){setGpsErr(null);iniciarFase(3);},1800);
+            }
+          } else {
+            midiendoRef.current=false;
+            setMidiendo(false);setMedFase(0);setMedCuenta(0);
+            var r1b=medRes1.current;
+            medRes1.current=null;medRes2.current=null;
+            guardarPunto(r1b);
+          }
+        } else {
+          midiendoRef.current=false;
+          setMidiendo(false);setMedFase(0);setMedCuenta(0);
+          var ra=medRes1.current;
+          var rb=medRes2.current;
+          medRes1.current=null;medRes2.current=null;
+          if(!result){
+            if(ra&&rb){
+              var p3={lat:(ra.lat+rb.lat)/2,lon:(ra.lon+rb.lon)/2,
+                      acc:Math.round((ra.acc+rb.acc)/2)};
+              guardarPunto(p3);
+            } else if(ra){guardarPunto(ra);}
+            return;
+          }
+          var d12=distM(ra.lat,ra.lon,rb.lat,rb.lon);
+          var d13=distM(ra.lat,ra.lon,result.lat,result.lon);
+          var d23=distM(rb.lat,rb.lon,result.lat,result.lon);
+          var best;
+          if(d12<=d13&&d12<=d23){
+            best={lat:(ra.lat+rb.lat)/2,lon:(ra.lon+rb.lon)/2,acc:Math.round((ra.acc+rb.acc)/2)};
+          } else if(d13<=d12&&d13<=d23){
+            best={lat:(ra.lat+result.lat)/2,lon:(ra.lon+result.lon)/2,acc:Math.round((ra.acc+result.acc)/2)};
+          } else {
+            best={lat:(rb.lat+result.lat)/2,lon:(rb.lon+result.lon)/2,acc:Math.round((rb.acc+result.acc)/2)};
+          }
+          guardarPunto(best);
+        }
+      }
+    },1000);
+  }
+
   function registrar() {
     if(!gpsVivo){setGpsErr("Esperá la señal GPS...");return;}
-    if(gpsVivo.acc>30){setGpsErr("Señal baja (±"+gpsVivo.acc+"m) — esperá un momento");return;}
-    if(puntos.length>0){
-      var prev=puntos[puntos.length-1];
-      var d=Math.round(distM(gpsVivo.lat,gpsVivo.lon,prev.lat,prev.lon));
-      if(d<3){setGpsErr("Muy cerca del punto anterior ("+d+"m) — mové más");return;}
-    }
-    setGpsErr(null);
-    setPuntos(function(prev){return prev.concat([{lat:gpsVivo.lat,lon:gpsVivo.lon,acc:gpsVivo.acc,num:prev.length+1}]);});
+    if(gpsVivo.acc>35){setGpsErr("Señal débil (±"+gpsVivo.acc+"m) — esperá mejor señal..."); return;}
+    if(midiendoRef.current) return;
+    iniciarFase(1);
   }
 
   function activar() {
@@ -528,7 +701,7 @@ window.App = function App() {
   function reconocer() {
     setReconoc(true);setPopup(false);
     clearTimeout(rTmr.current);
-    rTmr.current=setTimeout(function(){setReconoc(false);},15000);
+    rTmr.current=setTimeout(function(){setReconoc(false);},5000);
   }
 
   function reiniciar() {
@@ -536,6 +709,9 @@ window.App = function App() {
     setGpsPos(null);setReconoc(false);setPopup(false);setEqSel([]);
     if(wMon.current){navigator.geolocation.clearWatch(wMon.current);wMon.current=null;}
     clearInterval(aInt.current);
+    clearInterval(cuentaInt.current);
+    midiendoRef.current=false;
+    medBuf.current=[];
   }
 
   var subs=SECCIONES[seccion]||{};
@@ -574,14 +750,14 @@ window.App = function App() {
       )}
 
       {/* HEADER */}
-      <div style={{background:"#f0f0f0",borderBottom:"3px solid #d97706",padding:"8px 12px",flexShrink:0}}>
+      <div style={{background:"#f0f0f0",borderBottom:"3px solid #2563eb",padding:"8px 12px",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <img src={window.LOGO_T||""} style={{height:44,objectFit:"contain"}} alt="Transener"/>
-            <div style={{borderLeft:"2px solid #d97706",paddingLeft:8}}>
-              <div style={{fontSize:9,color:"#d97706",letterSpacing:2,fontWeight:700}}>TRANSENER S.A.</div>
-              <div style={{fontSize:12,color:"#cc5500",fontWeight:900}}>🦺 ZONA SEGURA</div>
-              <div style={{fontSize:9,color:"#888"}}>ET HENDERSON 500 kV</div>
+            <div style={{borderLeft:"2px solid #2563eb",paddingLeft:8}}>
+              <div style={{fontSize:9,color:"#16a34a",letterSpacing:2,fontWeight:700}}>TRANSENER S.A.</div>
+              <div style={{fontSize:12,color:"#15803d",fontWeight:900}}>🦺 ZONA SEGURA</div>
+              <div style={{fontSize:9,color:"#888"}}>ZONA SEGURA</div>
             </div>
           </div>
           <img src={window.LOGO_A||""} style={{height:44,objectFit:"contain"}} alt="ADN 2035"/>
@@ -636,24 +812,106 @@ window.App = function App() {
                   );
                 })}
               </div>
-              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                {eqs.map(function(id){
-                  var sel=eqSel.indexOf(id)>=0;
-                  return (
-                    <button key={id} onClick={function(){setEqSel(function(prev){return sel?prev.filter(function(x){return x!==id;}):[].concat(prev,[id]);});}}
-                      style={{padding:"5px 10px",borderRadius:4,cursor:"pointer",fontFamily:"monospace",fontSize:10,
-                        background:sel?"#1e3a5f":"#1a2535",color:sel?"#60a5fa":"#64748b",
-                        border:"1px solid "+(sel?"#3b82f6":"#1e2d3d")}}>
-                      {sel?"✓ ":""}{id}
-                    </button>
-                  );
-                })}
-              </div>
-              {eqSel.length>0&&<div style={{marginTop:8,fontSize:10,color:"#60a5fa"}}>✓ {eqSel.join(" · ")}</div>}
+              {seccion==="ET GENÉRICA"?(
+                <div>
+                  <div style={{marginBottom:6}}>
+                    <input
+                      placeholder="Nombre de la ET (ej: ET Costanera 220kV)"
+                      value={etGenNombre}
+                      onChange={function(e){setEtGenNombre(e.target.value.toUpperCase());}}
+                      style={{width:"100%",padding:"7px 10px",borderRadius:6,border:"1px solid #334155",
+                        background:"#0f1a2e",color:"white",fontSize:11,fontFamily:"monospace",
+                        boxSizing:"border-box",marginBottom:6}}
+                    />
+                    <div style={{display:"flex",gap:6,marginBottom:5}}>
+                      {[["INT","INTERRUPTOR","#22c55e"],["SB","SEC. BARRA","#60a5fa"],["SL","SEC. LÍNEA","#60a5fa"],["T","P. TIERRA","#f97316"]].map(function(opt){
+                        var sel=etGenTipo===opt[0];
+                        return <button key={opt[0]} onClick={function(){setEtGenTipo(opt[0]);}}
+                          style={{flex:1,padding:"5px 2px",borderRadius:5,border:"2px solid "+(sel?opt[2]:"#334155"),
+                            background:sel?"#0f2a1e":"#0f1a2e",color:sel?opt[2]:"#475569",
+                            fontWeight:sel?700:400,fontSize:9,fontFamily:"monospace",cursor:"pointer"}}>
+                          {opt[1]}
+                        </button>;
+                      })}
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <input
+                        placeholder="Nombre del equipo (ej: DL35, 52-L1...)"
+                        value={etGenInput}
+                        onChange={function(e){setEtGenInput(e.target.value.toUpperCase());}}
+                        onKeyDown={function(e){
+                          if(e.key==="Enter"||e.key===","){
+                            e.preventDefault();
+                            var v=etGenInput.trim().replace(/,$/,"").trim();
+                            var existe=etGenEqs.some(function(x){return x.id===v;});
+                            if(v&&!existe){
+                              EQ_TIPOS[v]=etGenTipo;
+                              setEtGenEqs(function(prev){return prev.concat([{id:v,tipo:etGenTipo}]);});
+                              setEqSel(function(prev){return prev.concat([v]);});
+                            }
+                            setEtGenInput("");
+                          }
+                        }}
+                        style={{flex:1,padding:"7px 10px",borderRadius:6,border:"1px solid #334155",
+                          background:"#0f1a2e",color:"white",fontSize:11,fontFamily:"monospace"}}
+                      />
+                      <button onClick={function(){
+                        var v=etGenInput.trim().replace(/,$/,"").trim();
+                        var existe=etGenEqs.some(function(x){return x.id===v;});
+                        if(v&&!existe){
+                          EQ_TIPOS[v]=etGenTipo;
+                          setEtGenEqs(function(prev){return prev.concat([{id:v,tipo:etGenTipo}]);});
+                          setEqSel(function(prev){return prev.concat([v]);});
+                        }
+                        setEtGenInput("");
+                      }} style={{padding:"7px 14px",borderRadius:6,border:"none",cursor:"pointer",
+                        background:"#16a34a",color:"white",fontWeight:700,fontSize:12}}>+ Agregar</button>
+                    </div>
+                    <div style={{fontSize:9,color:"#64748b",marginTop:3}}>
+                      Elegí el tipo, escribí el nombre y presioná Enter o Agregar.
+                    </div>
+                  </div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:4}}>
+                    {etGenEqs.map(function(eq){
+                      var strk=eq.tipo==="INT"?"#22c55e":eq.tipo==="T"?"#f97316":"#60a5fa";
+                      var bg=eq.tipo==="INT"?"#052e16":eq.tipo==="T"?"#1a0800":"#1e3a5f";
+                      return (
+                        <div key={eq.id} style={{display:"flex",alignItems:"center",gap:3,
+                          padding:"4px 8px",borderRadius:4,background:bg,
+                          border:"1px solid "+strk,fontFamily:"monospace",fontSize:10,color:strk}}>
+                          {eq.id}
+                          <span onClick={function(){
+                            setEtGenEqs(function(prev){return prev.filter(function(x){return x.id!==eq.id;});});
+                            setEqSel(function(prev){return prev.filter(function(x){return x!==eq.id;});});
+                          }} style={{cursor:"pointer",color:"#ef4444",fontWeight:700,marginLeft:2}}>✕</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {etGenEqs.length>0&&<div style={{marginTop:6,fontSize:10,color:"#86efac"}}>✓ {etGenEqs.length} equipo(s) — {etGenNombre||"ET sin nombre"}</div>}
+                </div>
+              ):(
+                <div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {eqs.map(function(id){
+                      var sel=eqSel.indexOf(id)>=0;
+                      return (
+                        <button key={id} onClick={function(){setEqSel(function(prev){return sel?prev.filter(function(x){return x!==id;}):[].concat(prev,[id]);});}}
+                          style={{padding:"5px 10px",borderRadius:4,cursor:"pointer",fontFamily:"monospace",fontSize:10,
+                            background:sel?"#1e3a5f":"#1a2535",color:sel?"#60a5fa":"#64748b",
+                            border:"1px solid "+(sel?"#3b82f6":"#1e2d3d")}}>
+                          {sel?"✓ ":""}{id}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {eqSel.length>0&&<div style={{marginTop:8,fontSize:10,color:"#60a5fa"}}>✓ {eqSel.join(" · ")}</div>}
+                </div>
+              )}
             </div>
             <button onClick={function(){setPaso("pts");}}
               style={{width:"100%",padding:"15px",borderRadius:10,border:"none",cursor:"pointer",
-                background:"#d97706",color:"white",fontWeight:900,fontSize:15,fontFamily:"monospace"}}>
+                background:"#16a34a",color:"white",fontWeight:900,fontSize:15,fontFamily:"monospace"}}>
               SIGUIENTE → REGISTRAR ZONA GPS
             </button>
           </div>
@@ -695,7 +953,7 @@ window.App = function App() {
                     <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
                       padding:"6px 0",borderBottom:i<puntos.length-1?"1px solid #1e2d3d":"none"}}>
                       <div style={{display:"flex",alignItems:"center",gap:8}}>
-                        <div style={{width:24,height:24,borderRadius:"50%",background:"#d97706",
+                        <div style={{width:24,height:24,borderRadius:"50%",background:"#16a34a",
                           display:"flex",alignItems:"center",justifyContent:"center",
                           fontSize:11,fontWeight:900,color:"white",flexShrink:0}}>
                           {p.num}
@@ -718,15 +976,85 @@ window.App = function App() {
               </div>
             )}
 
-            {gpsErr&&<div style={{color:"#f97316",fontSize:11,textAlign:"center",marginBottom:8,
-              padding:8,background:"#1a0a00",borderRadius:6}}>{gpsErr}</div>}
+            {gpsErr&&<div style={{color:gpsErr.indexOf("✓")>=0?"#22c55e":"#f97316",fontSize:11,textAlign:"center",marginBottom:8,
+              padding:8,background:gpsErr.indexOf("✓")>=0?"#0d2416":"#1a0a00",borderRadius:6}}>{gpsErr}</div>}
 
-            <button onClick={registrar} disabled={!gpsVivo||puntos.length>=20}
+            {/* v8.0: Panel de confirmación de distancia */}
+            {confirmar&&(
+              <div style={{marginBottom:8,background:"#0d2416",borderRadius:8,padding:"12px",border:"2px solid #22c55e"}}>
+                <div style={{color:"#86efac",fontSize:12,fontWeight:700,marginBottom:8,textAlign:"center"}}>
+                  📏 Punto {confirmar.num} registrado
+                </div>
+                <div style={{color:"white",fontSize:14,fontWeight:900,textAlign:"center",marginBottom:4}}>
+                  Distancia al punto anterior:
+                </div>
+                <div style={{color:"#fbbf24",fontSize:28,fontWeight:900,textAlign:"center",marginBottom:10}}>
+                  {confirmar.dist} m
+                </div>
+                <div style={{color:"#94a3b8",fontSize:11,textAlign:"center",marginBottom:10}}>
+                  ¿Es razonable lo que caminaste?
+                </div>
+                <div style={{marginBottom:10}}>
+                  <div style={{color:"#86efac",fontSize:10,marginBottom:4,textAlign:"center"}}>
+                    📐 Corrección opcional: si sabés la distancia real, ingresála
+                  </div>
+                  <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                    <input
+                      type="number"
+                      placeholder={"GPS: "+confirmar.dist+" m — corregir a..."}
+                      value={distCorr}
+                      onChange={function(e){setDistCorr(e.target.value);}}
+                      style={{flex:1,padding:"7px 10px",borderRadius:6,border:"1px solid #334155",
+                        background:"#0f1a2e",color:"#fbbf24",fontSize:13,fontFamily:"monospace",
+                        textAlign:"center",fontWeight:700}}
+                    />
+                    <span style={{color:"#64748b",fontSize:12}}>m</span>
+                  </div>
+                  <div style={{color:"#475569",fontSize:9,textAlign:"center",marginTop:3}}>
+                    Si dejás vacío, se usa la distancia GPS
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={function(){confirmarPunto(true);}} style={{
+                    flex:1,padding:"10px 0",borderRadius:8,border:"none",cursor:"pointer",
+                    background:"#16a34a",color:"white",fontWeight:700,fontSize:14}}>
+                    ✓ Guardar
+                  </button>
+                  <button onClick={function(){confirmarPunto(false);}} style={{
+                    flex:1,padding:"10px 0",borderRadius:8,border:"none",cursor:"pointer",
+                    background:"#dc2626",color:"white",fontWeight:700,fontSize:14}}>
+                    ✗ Repetir
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Indicador de colección GPS */}
+            {midiendo&&(
+              <div style={{marginBottom:8,background:"#0d1a3d",borderRadius:8,padding:"10px 12px",border:"2px solid #3b82f6"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <span style={{color:"#60a5fa",fontSize:12,fontWeight:700}}>{medFase===1?"📡 Medición 1 de 3...":medFase===2?"📡 Medición 2 de 3...":"📡 Medición 3/3 (desempate)..."}</span>
+                  <span style={{color:"#fbbf24",fontSize:18,fontWeight:900}}>{medCuenta}s</span>
+                </div>
+                <div style={{height:10,background:"#1e3a5f",borderRadius:5,overflow:"hidden"}}>
+                  <div style={{height:"100%",borderRadius:5,transition:"width 1s linear",
+                    background:medCuenta<=3?"#22c55e":"#3b82f6",
+                    width:Math.round((10-medCuenta)/10*100)+"%"}}/>
+                </div>
+                <div style={{textAlign:"center",fontSize:10,color:"#475569",marginTop:5}}>
+                  Quedate quieto — calcula la mediana de {medBuf.current.length} lecturas en {medCuenta}s
+                </div>
+              </div>
+            )}
+
+            <button onClick={registrar} disabled={!gpsVivo||puntos.length>=20||midiendo}
               style={{width:"100%",padding:"14px",borderRadius:10,border:"none",marginBottom:8,
-                cursor:(!gpsVivo||puntos.length>=20)?"not-allowed":"pointer",
-                background:!gpsVivo?"#1e2d3d":puntos.length>=20?"#1f2937":"#1e4a1f",
-                color:!gpsVivo?"#374151":"white",fontWeight:700,fontSize:14,fontFamily:"monospace"}}>
-              {!gpsVivo?"⏳ Esperando GPS...":puntos.length>=20?"Máximo 20 puntos":"📍 REGISTRAR PUNTO "+(puntos.length+1)+" (±"+(gpsVivo?gpsVivo.acc:0)+"m)"}
+                cursor:(!gpsVivo||puntos.length>=20||midiendo)?"not-allowed":"pointer",
+                background:midiendo?"#0d1a3d":!gpsVivo?"#1e2d3d":puntos.length>=20?"#1f2937":gpsVivo&&gpsVivo.acc<=15?"#1e4a1f":"#2d2d00",
+                color:!gpsVivo?"#374151":"white",fontWeight:700,fontSize:14,fontFamily:"monospace",
+                border:midiendo?"2px solid #3b82f6":"2px solid transparent"}}>
+              {midiendo?medFase===1?"⏳ Medición 1/3... "+medCuenta+"s (15s)":medFase===2?"⏳ Medición 2/3... "+medCuenta+"s (15s)":"⏳ Desempate 3/3... "+medCuenta+"s":!gpsVivo?"⏳ Esperando GPS...":puntos.length>=20?"Máximo 20 puntos":
+                "📍 REGISTRAR PUNTO "+(puntos.length+1)+" (±"+(gpsVivo?gpsVivo.acc:0)+"m"+(gpsVivo&&gpsVivo.acc<=15?" ✓":gpsVivo&&gpsVivo.acc<=25?" ⚠":" ✗")+")"}
             </button>
 
             {puntos.length<4&&puntos.length>0&&(
@@ -744,7 +1072,7 @@ window.App = function App() {
               {puntos.length>=4&&(
                 <button onClick={activar}
                   style={{flex:2,padding:"12px",borderRadius:8,border:"none",cursor:"pointer",
-                    background:"#d97706",color:"white",fontWeight:900,fontSize:14,fontFamily:"monospace"}}>
+                    background:"#16a34a",color:"white",fontWeight:900,fontSize:14,fontFamily:"monospace"}}>
                   🦺 ACTIVAR ZONA
                 </button>
               )}
@@ -792,7 +1120,7 @@ window.App = function App() {
               <rect x={90} y={22} width={200} height={22} rx={5} fill="#ef4444"/>
               <text x={190} y={37} textAnchor="middle" fontFamily="monospace" fontSize={11} fill="white" fontWeight="900">⛔ PROHIBIDO INGRESAR</text>
               <text x={190} y={54} textAnchor="middle" fontFamily="monospace" fontSize={9} fill="#fbbf24" fontWeight="700">SIN AUTORIZACIÓN DEL JT</text>
-              <text x={190} y={67} textAnchor="middle" fontFamily="monospace" fontSize={8} fill="#94a3b8">ZONA DE TRABAJO — ET Henderson 500kV</text>
+              <text x={190} y={67} textAnchor="middle" fontFamily="monospace" fontSize={8} fill="#94a3b8">ZONA DE TRABAJO — TRANSENER S.A.</text>
               <text x={190} y={84} textAnchor="middle" fontFamily="monospace" fontSize={7} fill="#475569">Transener S.A.</text>
 
               {/* EQUIPOS */}
@@ -854,7 +1182,7 @@ window.App = function App() {
 
       <div style={{borderTop:"1px solid #1e2d3d",padding:"5px",textAlign:"center",
         fontSize:8,color:"#1e2d3d",flexShrink:0}}>
-        Zona de Trabajo Seguro · ET Henderson 500kV · Transener S.A.
+        Transener S.A. · Zona Segura · v9.2 · Desarrollado en ET Henderson 500kV
       </div>
     </div>
   );
